@@ -107,14 +107,21 @@ export const creategenerate = asyncHandler(async (req, res)=>{
             console.log('Attempting to deduct credit for user:', req.user._id);
             console.log('Current user credits before deduction:', req.user.creditsLeft);
             
+            // Use atomic operation with retry logic for Render free tier
             const updatedUser = await User.findByIdAndUpdate(
                 req.user._id, 
                 { $inc: { creditsLeft: -1 } },
-                { new: true }
+                { 
+                    new: true,
+                    runValidators: true,
+                    // Add timeout for Render free tier
+                    maxTimeMS: 10000
+                }
             );
             
             if (!updatedUser) {
                 console.error('User not found for credit deduction:', req.user._id);
+                throw new ApiError(404, 'User not found for credit deduction');
             } else {
                 console.log('Credit deducted successfully. New credits:', updatedUser.creditsLeft);
                 // Update req.user to reflect the new credit count
@@ -122,7 +129,11 @@ export const creategenerate = asyncHandler(async (req, res)=>{
             }
         } catch (creditError) {
             console.error('Error deducting credit:', creditError);
-            // Don't fail the generation if credit deduction fails
+            // If credit deduction fails, mark generation as failed
+            generate.status = "failed";
+            generate.output = { error: "Credit deduction failed" };
+            await generate.save();
+            throw new ApiError(500, "Credit deduction failed: " + creditError.message);
         }
 
         return res

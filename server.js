@@ -32,6 +32,15 @@ app.use(express.json())
 app.use(cookieParser())
 
 
+// Health check endpoint to keep service awake on Render free tier
+app.get('/health', (req, res) => {
+    res.status(200).json({ 
+        status: 'OK', 
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
+    });
+});
+
 // routes
 app.use('/api/v1/users', userRoutes)
 app.use('/api/v1/generates', generatesRoutes)
