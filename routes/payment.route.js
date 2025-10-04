@@ -2,11 +2,40 @@ import express from "express";
 import { User } from "../models/user.model.js";
 import { createSubscription } from "../controllers/payment.controller.js";
 import { verifyJwt } from "../middleware/auth.middleware.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import crypto from "crypto";
 
 const router = express.Router();
 
 router.post("/create-subscription", verifyJwt, createSubscription);
+
+// Fast payment confirmation endpoint - users can call this immediately after payment
+router.post("/confirm-payment", verifyJwt, asyncHandler(async (req, res) => {
+    console.log('Payment confirmation request for user:', req.user._id);
+    
+    try {
+        // Get the most recent user data from database
+        const updatedUser = await User.findById(req.user._id);
+        
+        if (!updatedUser) {
+            throw new ApiError(404, 'User not found');
+        }
+        
+        console.log('User current plan:', updatedUser.planType, 'Credits:', updatedUser.creditsLeft);
+        
+        return res.status(200).json(new ApiResponse(200, {
+            planType: updatedUser.planType,
+            creditsLeft: updatedUser.creditsLeft,
+            razorpay_subscription_id: updatedUser.razorpay_subscription_id
+        }, "Payment status retrieved successfully"));
+        
+    } catch (error) {
+        console.error('Payment confirmation error:', error);
+        throw new ApiError(500, "Failed to confirm payment status: " + error.message);
+    }
+}));
 
 router.post("/razorpay/webhook", async (req, res) => {
     console.log('Webhook received:', new Date().toISOString());
@@ -56,16 +85,24 @@ router.post("/razorpay/webhook", async (req, res) => {
             const subscription = eventPayload.payload.subscription.entity;
             console.log('Processing subscription:', subscription.id);
             
-            const user = await User.findOne({ razorpay_subscription_id: subscription.id });
-            if (user) {
-                const mapping = planIdToAppPlan[subscription.plan_id] || { planType: "pro", creditsLeft: 100 };
-                console.log('Updating user credits:', user._id, 'to:', mapping);
-                
-                user.planType = mapping.planType;
-                user.creditsLeft = mapping.creditsLeft;
-                await user.save({ maxTimeMS: 10000 });
-                
-                console.log('User credits updated successfully');
+            const mapping = planIdToAppPlan[subscription.plan_id] || { planType: "pro", creditsLeft: 100 };
+            console.log('Updating user credits to:', mapping);
+            
+            // Use atomic update instead of find + save for better performance
+            const updatedUser = await User.findOneAndUpdate(
+                { razorpay_subscription_id: subscription.id },
+                { 
+                    planType: mapping.planType,
+                    creditsLeft: mapping.creditsLeft
+                },
+                { 
+                    new: true,
+                    maxTimeMS: 5000 // Faster timeout for webhook
+                }
+            );
+            
+            if (updatedUser) {
+                console.log('User credits updated successfully for:', updatedUser._id, 'New credits:', updatedUser.creditsLeft);
             } else {
                 console.error('User not found for subscription:', subscription.id);
             }
@@ -75,15 +112,21 @@ router.post("/razorpay/webhook", async (req, res) => {
             const subscription = eventPayload.payload.subscription.entity;
             console.log('Processing subscription cancellation:', subscription.id);
             
-            const user = await User.findOne({ razorpay_subscription_id: subscription.id });
-            if (user) {
-                console.log('Cancelling subscription for user:', user._id);
-                
-                user.planType = "free";
-                user.creditsLeft = 0;
-                await user.save({ maxTimeMS: 10000 });
-                
-                console.log('User subscription cancelled successfully');
+            // Use atomic update for cancellation too
+            const updatedUser = await User.findOneAndUpdate(
+                { razorpay_subscription_id: subscription.id },
+                { 
+                    planType: "free",
+                    creditsLeft: 0
+                },
+                { 
+                    new: true,
+                    maxTimeMS: 5000 // Faster timeout for webhook
+                }
+            );
+            
+            if (updatedUser) {
+                console.log('User subscription cancelled successfully for:', updatedUser._id);
             } else {
                 console.error('User not found for subscription cancellation:', subscription.id);
             }

@@ -65,12 +65,32 @@ export const creategenerate = asyncHandler(async (req, res)=>{
     console.log('Current credits:', req.user.creditsLeft);
     console.log('Generation type:', type);
 
+    // DEDUCT CREDIT IMMEDIATELY - BEFORE ANY AI PROCESSING
+    console.log('Deducting credit immediately for user:', req.user._id);
+    const updatedUser = await User.findByIdAndUpdate(
+        req.user._id, 
+        { $inc: { creditsLeft: -1 } },
+        { 
+            new: true,
+            runValidators: true
+        }
+    );
+    
+    if (!updatedUser) {
+        throw new ApiError(404, 'User not found for credit deduction');
+    }
+    
+    console.log('Credit deducted successfully. New credits:', updatedUser.creditsLeft);
+    // Update req.user to reflect the new credit count
+    req.user.creditsLeft = updatedUser.creditsLeft;
+
     const generate = await Generates.create({
         user: req.user._id,
         type,
         input,
         status: "pending"
     })
+
     try {
         let output
         if (type === "description"){
@@ -102,43 +122,12 @@ export const creategenerate = asyncHandler(async (req, res)=>{
         generate.status = "success";
         await generate.save();
 
-        // Deduct credit from user BEFORE sending response
-        try {
-            console.log('Attempting to deduct credit for user:', req.user._id);
-            console.log('Current user credits before deduction:', req.user.creditsLeft);
-            
-            // Use atomic operation with retry logic for Render free tier
-            const updatedUser = await User.findByIdAndUpdate(
-                req.user._id, 
-                { $inc: { creditsLeft: -1 } },
-                { 
-                    new: true,
-                    runValidators: true,
-                    // Add timeout for Render free tier
-                    maxTimeMS: 10000
-                }
-            );
-            
-            if (!updatedUser) {
-                console.error('User not found for credit deduction:', req.user._id);
-                throw new ApiError(404, 'User not found for credit deduction');
-            } else {
-                console.log('Credit deducted successfully. New credits:', updatedUser.creditsLeft);
-                // Update req.user to reflect the new credit count
-                req.user.creditsLeft = updatedUser.creditsLeft;
-            }
-        } catch (creditError) {
-            console.error('Error deducting credit:', creditError);
-            // If credit deduction fails, mark generation as failed
-            generate.status = "failed";
-            generate.output = { error: "Credit deduction failed" };
-            await generate.save();
-            throw new ApiError(500, "Credit deduction failed: " + creditError.message);
-        }
-
         return res
             .status(201)
-            .json(new ApiResponse(201, generate, "Generation created successfully"));
+            .json(new ApiResponse(201, { 
+                generate, 
+                updatedCredits: updatedUser.creditsLeft 
+            }, "Generation created successfully"));
     } catch (error) {
         generate.status = "failed";
         await generate.save();
